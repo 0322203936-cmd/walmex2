@@ -2,7 +2,7 @@
 Walmex Dashboard — CFBC
 Reporte ejecutivo estilo Walmart
 """
-import json, base64, openpyxl
+import json, base64
 from pathlib import Path
 from datetime import datetime as _dt
 import streamlit as st
@@ -24,12 +24,26 @@ iframe{display:block!important;margin:0!important;border:none!important}
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def cargar_datos() -> dict:
-    paths = ["Analisis_Walmart.xlsx", "Analisis Walmart.xlsx"]
-    excel_path = next((p for p in paths if Path(p).exists()), None)
+    import openpyxl
+    # Buscar el Excel con cualquier nombre/extensión
+    nombres = [
+        "Analisis_Walmart.xlsx","Analisis Walmart.xlsx",
+        "Analisis_Walmart1.xlsx","Analisis Walmart1.xlsx",
+        "analisis_walmart.xlsx","analisis walmart.xlsx",
+    ]
+    excel_path = next((p for p in nombres if Path(p).exists()), None)
     if not excel_path:
-        raise FileNotFoundError("No se encontró Analisis_Walmart.xlsx en el repositorio.")
+        # Buscar cualquier .xlsx en la raíz
+        xlsx = list(Path(".").glob("*.xlsx")) + list(Path(".").glob("*.XLSX"))
+        excel_path = str(xlsx[0]) if xlsx else None
+    if not excel_path:
+        archivos = [f.name for f in Path(".").iterdir()]
+        raise FileNotFoundError(
+            f"No se encontró el Excel. Archivos en el repo: {archivos}"
+        )
+
     wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
     ws = wb['Data']
 
@@ -42,7 +56,7 @@ def cargar_datos() -> dict:
         nl = name.strip().lower()
         for i, h in enumerate(headers):
             if h.strip().lower() == nl: return i
-        raise ValueError(f'Columna "{name}" no encontrada.')
+        raise ValueError(f'Columna "{name}" no encontrada. Disponibles: {[h for h in headers if h]}')
 
     idx_producto  = col('Desc Art 1')
     idx_tienda    = col('Nombre Tienda/Club')
@@ -51,8 +65,15 @@ def cargar_datos() -> dict:
     idx_ventas    = col('Cnt POS')
     idx_embarque  = col('Cntd Embarque')
     idx_merma_vc  = col('Cant VC Tienda')
-    idx_cfbc      = col('Venta CFBC / Costo (Facturado)')
-    idx_retail    = col('Retail VC Tienda')
+    # Columnas opcionales con fallback
+    idx_cfbc = None
+    for n in ['Venta CFBC / Costo (Facturado)','Venta CFBC/Costo (Facturado)','Venta CFBC','CFBC']:
+        try: idx_cfbc = col(n); break
+        except: pass
+    idx_retail = None
+    for n in ['Retail VC Tienda','Suma de Retail VC Tienda','Retail VC']:
+        try: idx_retail = col(n); break
+        except: pass
 
     records = []
     for row in ws.iter_rows(min_row=2, values_only=True):
@@ -66,7 +87,7 @@ def cargar_datos() -> dict:
         if hasattr(fecha_raw, 'strftime'):
             fecha = fecha_raw.strftime('%d/%m/%Y'); anio = fecha_raw.year
         elif fecha_raw:
-            for fmt in ('%m/%d/%Y', '%d/%m/%Y', '%Y-%m-%d'):
+            for fmt in ('%m/%d/%Y','%d/%m/%Y','%Y-%m-%d'):
                 try: dt = _dt.strptime(str(fecha_raw).strip(), fmt); fecha = dt.strftime('%d/%m/%Y'); anio = dt.year; break
                 except: continue
             else: fecha = str(fecha_raw)
@@ -79,8 +100,8 @@ def cargar_datos() -> dict:
             'ventas_u':   sv(row[idx_ventas]),
             'embarque_u': sv(row[idx_embarque]),
             'merma_u':    sv(row[idx_merma_vc]),
-            'venta_cfbc': sv(row[idx_cfbc]),
-            'retail_vc':  sv(row[idx_retail]),
+            'venta_cfbc': sv(row[idx_cfbc]) if idx_cfbc is not None else 0.0,
+            'retail_vc':  sv(row[idx_retail]) if idx_retail is not None else 0.0,
         })
     wb.close()
 
@@ -695,4 +716,12 @@ def build_html():
     ).decode('ascii')
     return HTML.replace('__DATA_JSON__', data_json)
 
-components.html(build_html(), height=1600, scrolling=True)
+
+# HTML cacheado en sesión — no se re-codifica en cada rerun
+if 'html_content' not in st.session_state:
+    data_json = base64.b64encode(
+        json.dumps(DATA, ensure_ascii=True, default=str).encode('utf-8')
+    ).decode('ascii')
+    st.session_state.html_content = HTML.replace('__DATA_JSON__', data_json)
+
+components.html(st.session_state.html_content, height=1600, scrolling=True)
