@@ -2,210 +2,178 @@
 Walmex Dashboard — CFBC
 Reporte ejecutivo estilo Walmart
 """
-import json, base64, openpyxl
-from collections import defaultdict
+import json, base64, io
 from pathlib import Path
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Walmex · CFBC", layout="wide", initial_sidebar_state="collapsed")
-
 st.markdown("""
 <style>
-.main .block-container { padding: 0 !important; max-width: 100% !important; margin: 0 !important; }
-.main { padding: 0 !important; overflow: hidden !important; }
-.stApp { margin: 0 !important; }
+.main .block-container{padding:0!important;max-width:100%!important;margin:0!important}
+.main{padding:0!important;overflow:hidden!important}
+.stApp{margin:0!important}
 [data-testid="stHeader"],[data-testid="stSidebar"],[data-testid="stToolbar"],
 [data-testid="stDecoration"],[data-testid="stStatusWidget"],
-#MainMenu, header, footer {
-    display: none !important; visibility: hidden !important; height: 0 !important;
-}
-.stDeployButton { display: none !important; }
-div[style*="bottom: 1.5rem"], div[style*="bottom: 15px"],
+#MainMenu,header,footer{display:none!important;visibility:hidden!important;height:0!important}
+.stDeployButton{display:none!important}
+div[style*="bottom: 1.5rem"],div[style*="bottom: 15px"],
 div[style*="position: fixed"][style*="bottom"][style*="right"],
-iframe[src*="badge"] {
-    display: none !important; opacity: 0 !important;
-    pointer-events: none !important; visibility: hidden !important;
-}
-[data-testid='stVerticalBlock'] { gap: 0 !important; padding: 0 !important; }
-div[data-testid='stHtml'] { padding: 0 !important; margin: 0 !important; line-height: 0 !important; }
-iframe { display: block !important; margin: 0 !important; border: none !important; }
+iframe[src*="badge"]{display:none!important;opacity:0!important;pointer-events:none!important}
+[data-testid='stVerticalBlock']{gap:0!important;padding:0!important}
+div[data-testid='stHtml']{padding:0!important;margin:0!important;line-height:0!important}
+iframe{display:block!important;margin:0!important;border:none!important}
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def cargar_datos(url: str = "") -> dict:
-    paths = ["Analisis_Walmart.xlsx", "Analisis Walmart.xlsx"]
-    excel_path = next((p for p in paths if Path(p).exists()), None)
+@st.cache_resource(show_spinner=False)
+def cargar_datos() -> dict:
+    # Buscar el Excel en la raíz del repo
+    # Buscar el Excel con cualquier variante de nombre
+    nombres = [
+        "Analisis_Walmart.xlsx", "Analisis Walmart.xlsx",
+        "Analisis_Walmart1.xlsx", "Analisis Walmart1.xlsx",
+        "Analisis_Walmart",  # sin extensión
+        "Analisis Walmart",
+    ]
+    # También buscar cualquier .xlsx en la raíz
+    excel_path = next((p for p in nombres if Path(p).exists()), None)
     if not excel_path:
-        raise FileNotFoundError("No se encontró Analisis_Walmart.xlsx. Súbelo al repo de GitHub.")
-    wb = openpyxl.load_workbook(excel_path, data_only=True)
-    ws = wb['Data']
-
-    def sv(v):
-        try: return float(v) if v is not None else 0.0
-        except: return 0.0
-
-    # Mapear columnas por nombre de encabezado — fila 1
-    headers = [str(c.value).strip() if c.value else '' for c in ws[1]]
-    def col(name):
-        for i, h in enumerate(headers):
-            if h == name: return i
-        raise ValueError(f'Columna "{name}" no encontrada. Encabezados: {headers}')
-
-    # Log headers para diagnóstico si alguna columna falla
-    import sys
-    _col_names = [h for h in headers if h]
-    
-    idx_producto = col('Desc Art 1')
-    idx_tienda   = col('Nombre Tienda/Club')
-    idx_semana   = col('SEM')
-    idx_fecha    = col('Diario')
-    idx_ventas   = col('Cnt POS')       # Unidades vendidas (Cnt POS)
-    idx_embarque = col('Cntd Embarque') # Unidades embarcadas
-    idx_merma_vc = col('Cant VC Tienda') # Merma (Cant VC Tienda)
-    
-    # Columnas opcionales para Tienda — intentar varios nombres posibles
-    idx_venta_cfbc = None
-    for _n in ['Venta CFBC / Costo (Facturado)', 'Venta CFBC/Costo (Facturado)',
-               'Venta CFBC', 'CFBC']:
-        try: idx_venta_cfbc = col(_n); break
-        except: pass
-
-    idx_retail_vc = None
-    for _n in ['Suma de Retail VC Tienda', 'Retail VC Tienda',
-               'Suma Retail VC Tienda', 'Retail VC', 'Suma de Retail VC',
-               'Suma de Retail VC Tienda ']:  # trailing space variant
-        try: idx_retail_vc = col(_n); break
-        except: pass
-
-    # Advertir si columnas clave no se encontraron
-    if idx_retail_vc is None:
-        import streamlit as _st
-        _st.warning(
-            f"⚠️ No se encontró columna 'Retail VC Tienda'. "
-            f"Columnas disponibles: {[h for h in headers if h and 'VC' in h or 'Retail' in h or 'retail' in h.lower() if h]}\n"
-            f"Todos los encabezados: {[h for h in headers if h]}"
+        xlsx_files = list(Path(".").glob("*.xlsx")) + list(Path(".").glob("*.XLSX"))
+        excel_path = str(xlsx_files[0]) if xlsx_files else None
+    if not excel_path:
+        archivos = list(Path(".").iterdir())
+        raise FileNotFoundError(
+            f"No se encontró el archivo Excel. "
+            f"Archivos en el repo: {[f.name for f in archivos]}"
         )
 
-    records = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        producto  = str(row[idx_producto]).strip() if row[idx_producto] else None
-        tienda    = str(row[idx_tienda]).strip()   if row[idx_tienda]   else None
-        # Semana: valor simple como 50, 51 etc
-        try:
-            semana_num = int(float(row[idx_semana])) if row[idx_semana] is not None else None
-        except:
-            semana_num = None
+    df = pd.read_excel(excel_path, sheet_name='Data', engine='openpyxl')
+    df.columns = df.columns.str.strip()
+    col_map = {c.lower(): c for c in df.columns}
 
-        # Fecha: puede venir como datetime o string MM/DD/YYYY
-        from datetime import datetime as _dt
-        fecha_raw = row[idx_fecha]
-        anio = None
-        if hasattr(fecha_raw, 'strftime'):
-            fecha = fecha_raw.strftime('%d/%m/%Y')
-            anio  = fecha_raw.year
-        elif fecha_raw:
-            s_fecha = str(fecha_raw).strip()
-            for fmt in ('%m/%d/%Y','%d/%m/%Y','%Y-%m-%d'):
-                try:
-                    dt   = _dt.strptime(s_fecha, fmt)
-                    fecha = dt.strftime('%d/%m/%Y')
-                    anio  = dt.year
-                    break
-                except:
-                    continue
-            else:
-                fecha = s_fecha
-        else:
-            fecha = ''
+    def get_col(names):
+        for n in names:
+            if n.lower() in col_map:
+                return col_map[n.lower()]
+        return None
 
-        if not producto or not tienda or not semana_num: continue
+    c_prod   = get_col(['Desc Art 1'])
+    c_tienda = get_col(['Nombre Tienda/Club'])
+    c_sem    = get_col(['SEM'])
+    c_fecha  = get_col(['Diario'])
+    c_ventas = get_col(['Cnt POS'])
+    c_emb    = get_col(['Cntd Embarque'])
+    c_merma  = get_col(['Cant VC Tienda'])
+    c_cfbc   = get_col(['Venta CFBC / Costo (Facturado)','Venta CFBC/Costo (Facturado)','Venta CFBC','CFBC'])
+    c_retail = get_col(['Retail VC Tienda','Suma de Retail VC Tienda','Retail VC'])
 
-        # Clave semana = año*100 + num  (ej: 202550)
-        semana = (anio * 100 + semana_num) if anio else semana_num
-        records.append({
-            'producto':   producto,
-            'tienda':     tienda,
-            'semana':     semana,
-            'fecha':      fecha,
-            'ventas_u':   sv(row[idx_ventas]),
-            'embarque_u': sv(row[idx_embarque]),
-            'merma_u':    sv(row[idx_merma_vc]),  # Tomar directamente de Cant VC Tienda
-            'venta_cfbc': sv(row[idx_venta_cfbc]) if idx_venta_cfbc is not None else 0,  # Venta CFBC
-            'retail_vc':  sv(row[idx_retail_vc]) if idx_retail_vc is not None else 0,   # Retail VC Tienda
-        })
+    for name, col in [('Desc Art 1', c_prod),('Nombre Tienda/Club', c_tienda),
+                      ('SEM', c_sem),('Diario', c_fecha),('Cnt POS', c_ventas),
+                      ('Cntd Embarque', c_emb),('Cant VC Tienda', c_merma)]:
+        if col is None:
+            raise ValueError(f'Columna requerida no encontrada: "{name}". Columnas en el Excel: {list(df.columns)}')
 
-    semanas   = sorted(set(r['semana'] for r in records))
-    tiendas   = sorted(set(r['tienda']  for r in records))
-    productos = sorted(set(r['producto'] for r in records))
+    df = df.rename(columns={
+        c_prod: 'producto', c_tienda: 'tienda', c_sem: 'semana',
+        c_fecha: 'fecha',   c_ventas: 'ventas_u', c_emb: 'embarque_u',
+        c_merma: 'merma_u',
+    })
+    if c_cfbc:   df = df.rename(columns={c_cfbc: 'venta_cfbc'})
+    else:        df['venta_cfbc'] = 0.0
+    if c_retail: df = df.rename(columns={c_retail: 'retail_vc'})
+    else:        df['retail_vc'] = 0.0
 
-    by_stp = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(float))))
-    for r in records:
-        by_stp[r['semana']][r['tienda']][r['producto']]['ventas_u']   += r['ventas_u']
-        by_stp[r['semana']][r['tienda']][r['producto']]['embarque_u'] += r['embarque_u']
-        by_stp[r['semana']][r['tienda']][r['producto']]['merma_u']    += r['merma_u']
-        by_stp[r['semana']][r['tienda']][r['producto']]['venta_cfbc'] += r['venta_cfbc']
-        by_stp[r['semana']][r['tienda']][r['producto']]['retail_vc']  += r['retail_vc']
+    df['producto'] = df['producto'].astype(str).str.strip()
+    df['tienda']   = df['tienda'].astype(str).str.strip()
+    df['semana']   = pd.to_numeric(df['semana'], errors='coerce')
+    df['fecha']    = pd.to_datetime(df['fecha'], errors='coerce', dayfirst=False)
+    for c in ['ventas_u','embarque_u','merma_u','venta_cfbc','retail_vc']:
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
 
-    # Fecha real del Excel por semana
-    fecha_por_semana = {}
-    for r in records:
-        if r['fecha']:
-            fecha_por_semana[r['semana']] = r['fecha']
+    df = df.dropna(subset=['producto','tienda','semana','fecha'])
+    df = df[df['producto'].str.len() > 0]
+    df['semana_key'] = df['fecha'].dt.year * 100 + df['semana'].astype(int)
+    df['fecha_str']  = df['fecha'].dt.strftime('%d/%m/%Y')
 
-    result = {}
+    semanas   = sorted(df['semana_key'].unique().tolist())
+    tiendas   = sorted(df['tienda'].unique().tolist())
+    productos = sorted(df['producto'].unique().tolist())
+
+    fecha_por_semana = (
+        df.groupby('semana_key')['fecha_str'].last()
+        .to_dict()
+    )
+    fecha_por_semana = {str(int(k)): v for k, v in fecha_por_semana.items()}
+
+    MCOLS = ['ventas_u','embarque_u','merma_u','venta_cfbc','retail_vc']
+    agg = df.groupby(['semana_key','tienda','producto'])[MCOLS].sum().reset_index()
+
+    # data[tienda][semana_str][producto] = {v12,v3,emb,m3,avg,proj,pct_merma,cfbc,retail}
+    by_stp = {}
+    for row in agg.itertuples(index=False):
+        sk = int(row.semana_key)
+        by_stp.setdefault(sk, {}).setdefault(row.tienda, {})[row.producto] = {
+            'ventas_u':   row.ventas_u,
+            'embarque_u': row.embarque_u,
+            'merma_u':    row.merma_u,
+            'venta_cfbc': row.venta_cfbc,
+            'retail_vc':  row.retail_vc,
+        }
+
+    data = {}
     for t in tiendas:
-        result[t] = {}
+        data[t] = {}
         for s in semanas:
-            idx    = semanas.index(s)
-            last12 = semanas[max(0, idx-11):idx+1]
-            last3  = semanas[max(0, idx-2):idx+1]
+            idx   = semanas.index(s)
+            l12   = semanas[max(0, idx-11):idx+1]
+            l3    = semanas[max(0, idx-2):idx+1]
+            n3    = len(l3) or 1
             prod_data = {}
             for p in productos:
-                v12  = sum(by_stp[sem][t][p]['ventas_u']   for sem in last12)
-                v3   = sum(by_stp[sem][t][p]['ventas_u']   for sem in last3)
-                emb3 = sum(by_stp[sem][t][p]['embarque_u'] for sem in last3)  # embarque 3 semanas
-                m3   = sum(by_stp[sem][t][p]['merma_u']    for sem in last3)  # merma 3 semanas (Cant VC Tienda)
-                cfbc3 = sum(by_stp[sem][t][p].get('venta_cfbc', 0) for sem in last3)  # Venta CFBC 3 semanas
-                retail3 = sum(by_stp[sem][t][p].get('retail_vc', 0) for sem in last3)  # Retail VC 3 semanas
-                avg  = v3 / len(last3) if last3 else 0  # Promedio = 3 semanas / 3
-                
-                # Proyección = Venta Promedio / (1 - Índice Merma %)
-                merma_ratio = m3 / emb3 if emb3 > 0 else 0  # Ratio de merma como decimal
-                proj = avg / (1 - merma_ratio) if merma_ratio < 1 else avg  # Evitar división por cero
-                
+                def g(sem, field):
+                    return by_stp.get(sem, {}).get(t, {}).get(p, {}).get(field, 0.0)
+                v12    = sum(g(sem,'ventas_u')   for sem in l12)
+                v3     = sum(g(sem,'ventas_u')   for sem in l3)
+                emb3   = sum(g(sem,'embarque_u') for sem in l3)
+                m3     = sum(g(sem,'merma_u')    for sem in l3)
+                cfbc3  = sum(g(sem,'venta_cfbc') for sem in l3)
+                ret3   = sum(g(sem,'retail_vc')  for sem in l3)
+                avg    = v3 / n3
+                mr     = m3 / emb3 if emb3 > 0 else 0
+                proj   = avg / (1 - mr) if mr < 1 else avg
                 prod_data[p] = {
                     'v12': round(v12), 'v3': round(v3),
                     'emb': round(emb3), 'm3': round(m3),
                     'avg': round(avg, 1), 'proj': round(proj),
                     'pct_merma': round(m3/emb3*100) if emb3 > 0 else 0,
-                    'cfbc': round(cfbc3), 'retail': round(retail3),
+                    'cfbc': round(cfbc3), 'retail': round(ret3),
                 }
-            result[t][s] = prod_data
+            data[t][str(s)] = prod_data
 
-    # Totales crudos acumulados por tienda — GLOBAL (todas las fechas, sin ventanas deslizantes)
-    totales_tienda = defaultdict(lambda: defaultdict(float))
-    # Totales crudos por tienda+semana — para filtrar por semana específica
-    raw_semana = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
-    for r in records:
-        totales_tienda[r['tienda']]['embarque_u'] += r['embarque_u']
-        totales_tienda[r['tienda']]['venta_cfbc'] += r['venta_cfbc']
-        totales_tienda[r['tienda']]['merma_u']    += r['merma_u']
-        totales_tienda[r['tienda']]['retail_vc']  += r['retail_vc']
-        raw_semana[r['tienda']][r['semana']]['embarque_u'] += r['embarque_u']
-        raw_semana[r['tienda']][r['semana']]['venta_cfbc'] += r['venta_cfbc']
-        raw_semana[r['tienda']][r['semana']]['merma_u']    += r['merma_u']
-        raw_semana[r['tienda']][r['semana']]['retail_vc']  += r['retail_vc']
+    agg_t = df.groupby('tienda')[MCOLS[1:]].sum()
+    totales_tienda = {
+        t: {'embarque_u': r.embarque_u, 'venta_cfbc': r.venta_cfbc,
+            'merma_u': r.merma_u, 'retail_vc': r.retail_vc}
+        for t, r in agg_t.iterrows()
+    }
+    agg_ts = df.groupby(['tienda','semana_key'])[MCOLS[1:]].sum().reset_index()
+    raw_semana = {}
+    for row in agg_ts.itertuples(index=False):
+        raw_semana.setdefault(row.tienda, {})[str(int(row.semana_key))] = {
+            'embarque_u': row.embarque_u, 'venta_cfbc': row.venta_cfbc,
+            'merma_u': row.merma_u, 'retail_vc': row.retail_vc,
+        }
 
     return {
         'semanas':          semanas,
         'tiendas':          tiendas,
         'productos':        productos,
         'fecha_por_semana': fecha_por_semana,
-        'data':             {t: {str(s): v for s, v in sv2.items()} for t, sv2 in result.items()},
-        'totales_tienda':   {t: dict(v) for t, v in totales_tienda.items()},
-        'raw_semana':       {t: {str(s): dict(v) for s, v in sv.items()} for t, sv in raw_semana.items()},
+        'data':             data,
+        'totales_tienda':   totales_tienda,
+        'raw_semana':       raw_semana,
     }
 
 try:
@@ -698,3 +666,12 @@ def build_html():
     return HTML.replace('__DATA_JSON__', data_json)
 
 components.html(build_html(), height=980, scrolling=False)
+
+# HTML cacheado en sesión para no re-codificar en cada rerun
+if 'html_content' not in st.session_state:
+    data_json = base64.b64encode(
+        json.dumps(DATA, ensure_ascii=True, default=str).encode('utf-8')
+    ).decode('ascii')
+    st.session_state.html_content = HTML.replace('__DATA_JSON__', data_json)
+
+components.html(st.session_state.html_content, height=980, scrolling=False)
