@@ -4,7 +4,7 @@ Reporte ejecutivo estilo Walmart
 """
 import json, base64
 from pathlib import Path
-from datetime import datetime as _dt
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -26,116 +26,107 @@ iframe{display:block!important;margin:0!important;border:none!important}
 
 @st.cache_resource(show_spinner=False)
 def cargar_datos() -> dict:
-    import openpyxl
-    # Buscar el Excel con cualquier nombre/extensión
-    nombres = [
-        "Analisis_Walmart.xlsx","Analisis Walmart.xlsx",
-        "Analisis_Walmart1.xlsx","Analisis Walmart1.xlsx",
-        "analisis_walmart.xlsx","analisis walmart.xlsx",
-    ]
+    # Buscar el Excel con cualquier nombre
+    nombres = ["Analisis_Walmart.xlsx","Analisis Walmart.xlsx",
+               "Analisis_Walmart1.xlsx","Analisis Walmart1.xlsx"]
     excel_path = next((p for p in nombres if Path(p).exists()), None)
     if not excel_path:
-        # Buscar cualquier .xlsx en la raíz
         xlsx = list(Path(".").glob("*.xlsx")) + list(Path(".").glob("*.XLSX"))
         excel_path = str(xlsx[0]) if xlsx else None
     if not excel_path:
-        archivos = [f.name for f in Path(".").iterdir()]
         raise FileNotFoundError(
-            f"No se encontró el Excel. Archivos en el repo: {archivos}"
+            f"No se encontró el Excel. Archivos: {[f.name for f in Path('.').iterdir()]}"
         )
 
-    wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
-    ws = wb['Data']
+    # pandas lee 10x más rápido que openpyxl fila a fila
+    df = pd.read_excel(excel_path, sheet_name='Data', engine='openpyxl')
+    df.columns = df.columns.str.strip()
+    col_map = {c.strip().lower(): c for c in df.columns}
 
-    def sv(v):
-        try: return float(v) if v is not None else 0.0
-        except: return 0.0
+    def get(names):
+        for n in names:
+            if n.strip().lower() in col_map:
+                return col_map[n.strip().lower()]
+        return None
 
-    headers = [str(c.value).strip() if c.value else '' for c in next(ws.iter_rows(min_row=1, max_row=1))]
-    def col(name):
-        nl = name.strip().lower()
-        for i, h in enumerate(headers):
-            if h.strip().lower() == nl: return i
-        raise ValueError(f'Columna "{name}" no encontrada. Disponibles: {[h for h in headers if h]}')
+    c_prod   = get(['Desc Art 1'])
+    c_tienda = get(['Nombre Tienda/Club'])
+    c_sem    = get(['SEM'])
+    c_fecha  = get(['Diario'])
+    c_ventas = get(['Cnt POS'])
+    c_emb    = get(['Cntd Embarque'])
+    c_merma  = get(['Cant VC Tienda'])
+    c_cfbc   = get(['Venta CFBC / Costo (Facturado)','Venta CFBC/Costo (Facturado)','Venta CFBC','CFBC'])
+    c_retail = get(['Retail VC Tienda','Suma de Retail VC Tienda','Retail VC'])
 
-    idx_producto  = col('Desc Art 1')
-    idx_tienda    = col('Nombre Tienda/Club')
-    idx_semana    = col('SEM')
-    idx_fecha     = col('Diario')
-    idx_ventas    = col('Cnt POS')
-    idx_embarque  = col('Cntd Embarque')
-    idx_merma_vc  = col('Cant VC Tienda')
-    # Columnas opcionales con fallback
-    idx_cfbc = None
-    for n in ['Venta CFBC / Costo (Facturado)','Venta CFBC/Costo (Facturado)','Venta CFBC','CFBC']:
-        try: idx_cfbc = col(n); break
-        except: pass
-    idx_retail = None
-    for n in ['Retail VC Tienda','Suma de Retail VC Tienda','Retail VC']:
-        try: idx_retail = col(n); break
-        except: pass
+    for label, c in [('Desc Art 1',c_prod),('Nombre Tienda/Club',c_tienda),
+                     ('SEM',c_sem),('Diario',c_fecha),('Cnt POS',c_ventas),
+                     ('Cntd Embarque',c_emb),('Cant VC Tienda',c_merma)]:
+        if c is None:
+            raise ValueError(f'Columna requerida no encontrada: "{label}". Columnas: {list(df.columns)}')
 
-    records = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        producto = str(row[idx_producto]).strip() if row[idx_producto] else None
-        tienda   = str(row[idx_tienda]).strip()   if row[idx_tienda]   else None
-        try: semana_num = int(float(row[idx_semana])) if row[idx_semana] is not None else None
-        except: semana_num = None
-        if not producto or not tienda or not semana_num: continue
+    df = df.rename(columns={c_prod:'producto',c_tienda:'tienda',c_sem:'semana',
+                             c_fecha:'fecha',c_ventas:'ventas_u',c_emb:'embarque_u',
+                             c_merma:'merma_u'})
+    df['venta_cfbc'] = pd.to_numeric(df[c_cfbc],   errors='coerce').fillna(0) if c_cfbc   else 0.0
+    df['retail_vc']  = pd.to_numeric(df[c_retail], errors='coerce').fillna(0) if c_retail else 0.0
 
-        fecha_raw = row[idx_fecha]; anio = None
-        if hasattr(fecha_raw, 'strftime'):
-            fecha = fecha_raw.strftime('%d/%m/%Y'); anio = fecha_raw.year
-        elif fecha_raw:
-            for fmt in ('%m/%d/%Y','%d/%m/%Y','%Y-%m-%d'):
-                try: dt = _dt.strptime(str(fecha_raw).strip(), fmt); fecha = dt.strftime('%d/%m/%Y'); anio = dt.year; break
-                except: continue
-            else: fecha = str(fecha_raw)
-        else: fecha = ''
-        if not anio: continue
+    df['producto'] = df['producto'].astype(str).str.strip()
+    df['tienda']   = df['tienda'].astype(str).str.strip()
+    df['semana']   = pd.to_numeric(df['semana'], errors='coerce')
+    df['fecha']    = pd.to_datetime(df['fecha'], errors='coerce', dayfirst=False)
+    for c in ['ventas_u','embarque_u','merma_u']:
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
 
-        records.append({
-            'producto': producto, 'tienda': tienda,
-            'semana':   anio * 100 + semana_num, 'fecha': fecha,
-            'ventas_u':   sv(row[idx_ventas]),
-            'embarque_u': sv(row[idx_embarque]),
-            'merma_u':    sv(row[idx_merma_vc]),
-            'venta_cfbc': sv(row[idx_cfbc]) if idx_cfbc is not None else 0.0,
-            'retail_vc':  sv(row[idx_retail]) if idx_retail is not None else 0.0,
-        })
-    wb.close()
+    df = df.dropna(subset=['producto','tienda','semana','fecha'])
+    df = df[df['producto'].str.len() > 0]
+    df['semana_key'] = df['fecha'].dt.year * 100 + df['semana'].astype(int)
+    df['fecha_str']  = df['fecha'].dt.strftime('%d/%m/%Y')
 
-    semanas   = sorted(set(r['semana']   for r in records))
-    tiendas   = sorted(set(r['tienda']   for r in records))
-    productos = sorted(set(r['producto'] for r in records))
+    semanas   = sorted(df['semana_key'].unique().tolist())
+    tiendas   = sorted(df['tienda'].unique().tolist())
+    productos = sorted(df['producto'].unique().tolist())
 
-    fecha_por_semana = {}; raw = {}; raw_sem_t = {}
-    totales_tienda = {}; totales_producto = {}; totales_tienda_prod = {}
+    fecha_por_semana = {str(int(k)): v for k,v in
+        df.groupby('semana_key')['fecha_str'].last().to_dict().items()}
 
-    for r in records:
-        t2=r['tienda']; s2=r['semana']; p2=r['producto']; sk=str(s2)
-        vu=r['ventas_u']; eu=r['embarque_u']; mu=r['merma_u']; cf=r['venta_cfbc']; rv=r['retail_vc']
+    MCOLS = ['ventas_u','embarque_u','merma_u','venta_cfbc','retail_vc']
+    agg = df.groupby(['semana_key','tienda','producto'])[MCOLS].sum().reset_index()
 
-        if r['fecha']: fecha_por_semana[s2] = r['fecha']
+    # Construir raw[sk][tienda][producto] = [vu,eu,mu,cf,rv]
+    raw = {}
+    for row in agg.itertuples(index=False):
+        sk = str(int(row.semana_key))
+        raw.setdefault(sk, {}).setdefault(row.tienda, {})[row.producto] = [
+            row.ventas_u, row.embarque_u, row.merma_u, row.venta_cfbc, row.retail_vc]
 
-        if sk not in raw:         raw[sk] = {}
-        if t2 not in raw[sk]:     raw[sk][t2] = {}
-        if p2 not in raw[sk][t2]: raw[sk][t2][p2] = [0,0,0,0,0]
-        x = raw[sk][t2][p2]; x[0]+=vu; x[1]+=eu; x[2]+=mu; x[3]+=cf; x[4]+=rv
+    # raw_sem_t[tienda][sk]
+    MCOLS2 = ['embarque_u','venta_cfbc','merma_u','retail_vc']
+    agg_ts = df.groupby(['tienda','semana_key'])[MCOLS2].sum().reset_index()
+    raw_sem_t = {}
+    for row in agg_ts.itertuples(index=False):
+        sk = str(int(row.semana_key))
+        raw_sem_t.setdefault(row.tienda, {})[sk] = {
+            'embarque_u':row.embarque_u,'venta_cfbc':row.venta_cfbc,
+            'merma_u':row.merma_u,'retail_vc':row.retail_vc}
 
-        if t2 not in raw_sem_t:       raw_sem_t[t2] = {}
-        if sk not in raw_sem_t[t2]:   raw_sem_t[t2][sk] = {'embarque_u':0,'venta_cfbc':0,'merma_u':0,'retail_vc':0}
-        d=raw_sem_t[t2][sk]; d['embarque_u']+=eu; d['venta_cfbc']+=cf; d['merma_u']+=mu; d['retail_vc']+=rv
+    # totales_tienda, totales_producto, totales_tienda_prod
+    agg_t = df.groupby('tienda')[MCOLS2].sum()
+    totales_tienda = {t:{'embarque_u':r.embarque_u,'venta_cfbc':r.venta_cfbc,
+                         'merma_u':r.merma_u,'retail_vc':r.retail_vc}
+                     for t,r in agg_t.iterrows()}
 
-        if t2 not in totales_tienda:   totales_tienda[t2] = {'embarque_u':0,'venta_cfbc':0,'merma_u':0,'retail_vc':0}
-        d=totales_tienda[t2]; d['embarque_u']+=eu; d['venta_cfbc']+=cf; d['merma_u']+=mu; d['retail_vc']+=rv
+    agg_p = df.groupby('producto')[MCOLS2].sum()
+    totales_producto = {p:{'embarque_u':r.embarque_u,'venta_cfbc':r.venta_cfbc,
+                           'merma_u':r.merma_u,'retail_vc':r.retail_vc}
+                       for p,r in agg_p.iterrows()}
 
-        if p2 not in totales_producto: totales_producto[p2] = {'embarque_u':0,'venta_cfbc':0,'merma_u':0,'retail_vc':0}
-        d=totales_producto[p2]; d['embarque_u']+=eu; d['venta_cfbc']+=cf; d['merma_u']+=mu; d['retail_vc']+=rv
-
-        if t2 not in totales_tienda_prod:      totales_tienda_prod[t2] = {}
-        if p2 not in totales_tienda_prod[t2]:  totales_tienda_prod[t2][p2] = {'embarque_u':0,'venta_cfbc':0,'merma_u':0,'retail_vc':0}
-        d=totales_tienda_prod[t2][p2]; d['embarque_u']+=eu; d['venta_cfbc']+=cf; d['merma_u']+=mu; d['retail_vc']+=rv
+    agg_tp = df.groupby(['tienda','producto'])[MCOLS2].sum().reset_index()
+    totales_tienda_prod = {}
+    for row in agg_tp.itertuples(index=False):
+        totales_tienda_prod.setdefault(row.tienda, {})[row.producto] = {
+            'embarque_u':row.embarque_u,'venta_cfbc':row.venta_cfbc,
+            'merma_u':row.merma_u,'retail_vc':row.retail_vc}
 
     return {
         'semanas':             semanas,
@@ -716,8 +707,9 @@ def build_html():
     ).decode('ascii')
     return HTML.replace('__DATA_JSON__', data_json)
 
+components.html(build_html(), height=1600, scrolling=True)
 
-# HTML cacheado en sesión — no se re-codifica en cada rerun
+# HTML cacheado en sesión — no re-codifica en cada rerun
 if 'html_content' not in st.session_state:
     data_json = base64.b64encode(
         json.dumps(DATA, ensure_ascii=True, default=str).encode('utf-8')
